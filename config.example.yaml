@@ -1,0 +1,12 @@
+model_list:
+  - model_name: codex-default
+    litellm_params:
+      model: codex_rpc/codex-default
+litellm_settings:
+  custom_provider_map:
+    - provider: codex_rpc
+      custom_handler: proxy_handler.codex_rpc_provider
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+router_settings:
+  num_retries: 0

@@ -1,0 +1,16 @@
+services:
+  proxy:
+    build: .
+    ports:
+      - "127.0.0.1:4000:4000"
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set a proxy authentication key}
+      CODEX_RPC_SOCKET_PATH: /run/codex/codex.sock
+    volumes:
+      - ${CODEX_SOCKET_DIR:?Set the external Codex socket directory}:/run/codex:ro
+    group_add:
+      - ${CODEX_SOCKET_GID:?Set the socket access group ID}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    restart: unless-stopped
