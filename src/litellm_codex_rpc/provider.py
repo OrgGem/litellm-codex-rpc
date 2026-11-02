@@ -9,7 +9,7 @@ from .backends.rpc_backend import RPCBackend
 from .config import Config
 from .converters.messages import convert
 from .converters.responses import chunk, response
-from .errors import invalid
+from .errors import ProviderError, invalid
 
 
 class CodexRPCProvider(CustomLLM):
@@ -22,13 +22,18 @@ class CodexRPCProvider(CustomLLM):
     def __init__(self, config=None):
         super().__init__()
         self.config = config or Config.from_env()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._closed = False
         self._loop = None
         self._backend = None
         self._thread = None
 
     def _ensure(self):
         with self._lock:
+            if self._closed:
+                raise ProviderError(
+                    "connection", "Provider is closed; create a new instance."
+                )
             if self._loop:
                 return
             self.config = self.config or Config.from_env()
@@ -44,35 +49,36 @@ class CodexRPCProvider(CustomLLM):
         alias = model.removeprefix("codex_rpc/")
         if alias not in self.config.models:
             raise invalid("Unknown model alias; configure CODEX_MODEL_MAP.")
-        params = kwargs.get("optional_params") or {}
+        framework_options = {
+            "api_base",
+            "custom_prompt_dict",
+            "model_response",
+            "print_verbose",
+            "encoding",
+            "api_key",
+            "logging_obj",
+            "optional_params",
+            "acompletion",
+            "litellm_params",
+            "logger_fn",
+            "headers",
+            "timeout",
+            "client",
+            "stream",
+        }
         if any(
-            k not in {"stream", "stream_options", "extra_headers", "max_retries"}
-            and v is not None
-            for k, v in params.items()
+            key not in framework_options and value is not None
+            for key, value in kwargs.items()
         ):
-            raise invalid(
-                "Unsupported completion parameter: "
-                + ",".join(
-                    k
-                    for k, v in params.items()
-                    if k
-                    not in {"stream", "stream_options", "extra_headers", "max_retries"}
-                    and v is not None
-                )
-            )
-        for key in (
-            "tools",
-            "tool_choice",
-            "functions",
-            "function_call",
-            "response_format",
-            "temperature",
-            "max_tokens",
-            "max_completion_tokens",
-            "reasoning_effort",
+            raise invalid("Unsupported completion parameter.")
+        params = kwargs.get("optional_params") or {}
+        if not isinstance(params, dict):
+            raise invalid("optional_params must be an object.")
+        if any(
+            key not in {"stream", "max_retries"} and value is not None
+            for key, value in params.items()
         ):
-            if kwargs.get(key) is not None:
-                raise invalid("Unsupported completion parameter: " + key)
+            raise invalid("Unsupported completion parameter; only stream is supported.")
         return Request(
             self.config.models[alias],
             convert(messages, self.config.flatten),
@@ -82,7 +88,13 @@ class CodexRPCProvider(CustomLLM):
         )
 
     def _submit(self, coro):
-        return asyncio.run_coroutine_threadsafe(coro, self._loop)
+        with self._lock:
+            if self._closed or self._loop is None:
+                coro.close()
+                raise ProviderError(
+                    "connection", "Provider is closed; create a new instance."
+                )
+            return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def completion(self, model, messages, **kwargs):
         request = self._request(model, messages, kwargs)
@@ -105,7 +117,8 @@ class CodexRPCProvider(CustomLLM):
                 except StopAsyncIteration:
                     return
         finally:
-            self._submit(stream.aclose()).result()
+            if not self._closed:
+                self._submit(stream.aclose()).result()
 
     async def astreaming(self, model, messages, **kwargs):
         request = self._request(model, messages, kwargs)
@@ -123,10 +136,12 @@ class CodexRPCProvider(CustomLLM):
                     await asyncio.sleep(0.01)
                 await stream.aclose()
 
-            await asyncio.shield(asyncio.wrap_future(self._submit(finish())))
+            if not self._closed:
+                await asyncio.shield(asyncio.wrap_future(self._submit(finish())))
 
     def close(self):
         with self._lock:
+            self._closed = True
             if self._loop is None:
                 return
 
@@ -142,7 +157,7 @@ class CodexRPCProvider(CustomLLM):
                 if pending:
                     await asyncio.gather(*pending, return_exceptions=True)
 
-            self._submit(shutdown()).result()
+            asyncio.run_coroutine_threadsafe(shutdown(), self._loop).result()
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._thread.join()
             self._loop.close()

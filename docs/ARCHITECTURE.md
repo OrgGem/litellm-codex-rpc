@@ -5,7 +5,8 @@ No independent HTTP adapter and no LiteLLM core changes. The package is independ
 authored because reference licensing is unresolved.
 
 Each provider lazily owns a worker event loop; sync calls submit futures and async calls
-await wrapped futures. Both streaming interfaces request one event at a time. A semaphore
+await wrapped futures. A persistent producer task owns each turn and its deadline;
+both streaming interfaces consume a bounded 16-event output queue. A semaphore
 limits active turns per provider/process. Each request opens a fresh initialized connection,
 creates an ephemeral thread and executes one turn. Independent connections and thread/turn
 filters prevent cross-request event leakage. Correlation IDs and pending futures handle RPC
@@ -15,7 +16,9 @@ than silently dropping output or blocking the response reader. WebSocket buffers
 Connection reuse is deliberately deferred. Reconnection means establishing a fresh connection
 for a subsequent request; no request or turn is replayed. Setting auto reconnect false latches
 connection failures until the provider is recreated. Disable LiteLLM router retries too.
-Request deadline includes semaphore admission, handshake and execution. Cancellation sends a
+Request deadline includes semaphore admission, handshake, execution and output backpressure.
+Shutdown interrupts and awaits producer tasks before closing connections. Closed providers
+reject further work; construct a new provider instance to restart. Cancellation sends a
 best-effort interrupt and closes the connection; this cannot prove a remote turn has stopped.
 
 The backend interface provides completion, stream, model listing, health and close. Only RPC is

@@ -18,6 +18,7 @@ class RPCBackend:
         self.config = config
         self.slots = asyncio.Semaphore(config.max_concurrent)
         self.clients = set()
+        self.producers = set()
         self.failed = False
         self.closed = False
 
@@ -34,13 +35,15 @@ class RPCBackend:
             c = RPCClient(t, self.config.request_timeout)
             self.clients.add(c)
             try:
-                await c.initialize()
+                await asyncio.wait_for(c.initialize(), self.config.connect_timeout)
             except BaseException:
                 await c.close()
                 self.clients.discard(c)
                 raise
             return c
-        except ProviderError:
+        except ProviderError as error:
+            if error.category == "connection":
+                self.failed = True
             raise
         except Exception:
             self.failed = True
@@ -50,6 +53,46 @@ class RPCBackend:
             ) from None
 
     async def stream(self, request):
+        # A single producer owns the deadline and turn lifecycle across all yields.
+        # Consumers (including the sync bridge) may use a different Task per read.
+        queue = asyncio.Queue(16)
+
+        async def produce():
+            try:
+                await self._execute(request, queue.put)
+            except Exception as error:
+                await queue.put(error)
+            else:
+                await queue.put(None)
+
+        def finished(task):
+            self.producers.discard(task)
+            if task.cancelled():
+                # Runs even when cancelled before produce() starts, or while
+                # publishing an error/EOF into a full output queue.
+                while not queue.empty():
+                    queue.get_nowait()
+                queue.put_nowait(
+                    ProviderError("cancelled", "Codex stream closed.", 499)
+                )
+
+        producer = asyncio.create_task(produce())
+        self.producers.add(producer)
+        producer.add_done_callback(finished)
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    return
+                if isinstance(event, Exception):
+                    raise event
+                yield event
+        finally:
+            producer.cancel()
+            with suppress(asyncio.CancelledError):
+                await producer
+
+    async def _execute(self, request, emit):
         c = None
         thread = None
         turn = None
@@ -86,6 +129,8 @@ class RPCBackend:
                         },
                     )
                     thread = result["thread"]["id"]
+                    if not isinstance(thread, str) or not thread:
+                        raise ValueError("Invalid thread ID")
                     result = await c.request(
                         "turn/start",
                         {
@@ -94,9 +139,11 @@ class RPCBackend:
                         },
                     )
                     turn = result["turn"]["id"]
+                    if not isinstance(turn, str) or not turn:
+                        raise ValueError("Invalid turn ID")
                     usage = None
                     while True:
-                        event = await c.events.get()
+                        event = await c.next_event()
                         if isinstance(event, Exception):
                             raise event
                         p = event.get("params", {})
@@ -107,9 +154,11 @@ class RPCBackend:
                         if event_turn and event_turn != turn:
                             continue
                         if method == "item/agentMessage/delta":
+                            if not isinstance(p.get("delta"), str):
+                                raise ValueError("Invalid text delta")
                             if first is None:
                                 first = time.monotonic() - started
-                            yield Event(text=p["delta"])
+                            await emit(Event(text=p["delta"]))
                         elif method == "thread/tokenUsage/updated":
                             usage = p.get("tokenUsage", {}).get("last")
                         elif method == "item/started" and p.get("item", {}).get(
@@ -136,9 +185,15 @@ class RPCBackend:
                                 raise remote_error(terminal.get("error") or {})
                             complete = True
                             status = "completed"
-                            yield Event(done=True, usage=usage)
+                            await emit(Event(done=True, usage=usage))
                             return
+        except (KeyError, TypeError, ValueError, AttributeError):
+            status = "protocol"
+            raise ProviderError(
+                "protocol", "Malformed Codex response or event."
+            ) from None
         except TimeoutError:
+            status = "timeout"
             raise ProviderError("timeout", "Codex turn timed out.", 504) from None
         except asyncio.CancelledError:
             status = "cancelled"
@@ -201,5 +256,9 @@ class RPCBackend:
 
     async def close(self):
         self.closed = True
+        producers = list(self.producers)
+        for producer in producers:
+            producer.cancel()
+        await asyncio.gather(*producers, return_exceptions=True)
         await asyncio.gather(*(c.close() for c in list(self.clients)))
         self.clients.clear()

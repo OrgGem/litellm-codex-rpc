@@ -18,7 +18,9 @@ def invalid(message):
     return ProviderError("invalid_request", message, 400)
 
 
-def remote_error(data):
+def remote_error(data, code=None):
+    if code == -32602:
+        return invalid("Codex rejected the model or RPC parameters.")
     info = data.get("codexErrorInfo") if isinstance(data, dict) else None
     if info == "unauthorized":
         return ProviderError(

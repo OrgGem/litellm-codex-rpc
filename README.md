@@ -74,7 +74,7 @@ rejected. Empty string content is preserved. Unknown aliases fail before executi
 Register from Python using `litellm.custom_provider_map = [{"provider":"codex_rpc",
 "custom_handler":codex_rpc_provider}]` after importing the instance from
 `litellm_codex_rpc`. Call `close()` / `await aclose()` on shutdown. Instantiate providers
-after worker fork. Sync streaming is incremental, including when called within an
+after worker fork. Closing a provider is terminal; construct a new instance to restart. Sync streaming is incremental, including when called within an
 existing event loop; asynchronous calls execute on a dedicated provider loop.
 
 ## Development

@@ -37,9 +37,11 @@ compatibility from the fixture suite. See SECURITY.md for remaining runtime isol
 
 ## Repeatable checks
 
-`pytest -q` runs 19 unit/integration/Proxy checks with local fixtures (no model usage).
+`pytest -q` runs 39 unit/integration/Proxy checks with local fixtures (no model usage).
 `python scripts/verify_protocol.py` requires installed Codex and checks generated schemas.
 `python scripts/container_smoke.py` requires Docker and the built 0.2.0 image; it uses fixture
 responses over a shared Unix socket, not subscription resources.
 
 Container smoke completed successfully with the final image, including nonroot config access and group-restricted socket access. No credentials were mounted into the Proxy container.
+
+The lifecycle/error review and regression evidence are recorded in [CODE_REVIEW.md](CODE_REVIEW.md).
